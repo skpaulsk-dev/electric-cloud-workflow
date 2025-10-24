@@ -1,0 +1,321 @@
+yawl: '0.1'
+start: route
+steps:
+  route:
+    switch:
+      # приводим текст к валидной JSON-строке, чтобы парсер switch не спотыкался
+      input: '\((.input.message.text // "" | tojson))'
+      choices:
+        - condition: '\((. | ascii_downcase | startswith("/start")))'
+          next: do_start
+      default:
+        next: load_ctx
+
+  # === /start: создаём/ищем проект через Cloud Function ===
+  do_start:
+    httpCall:
+      url: https://functions.yandexcloud.net/d4e8ta94341329251lah
+      method: POST
+      headers:
+        Content-Type: application/json
+      body: |
+        \({
+          action: "upsertuserandproject",
+          tg_user_id: .input.message.from.id,
+          tg_username: (.input.message.from.username // ""),
+          first_name: (.input.message.from.first_name // ""),
+          last_name:  (.input.message.from.last_name // ""),
+          language_code: (.input.message.from.language_code // "")
+        })
+      # у тебя CF уже возвращает JSON-объект; берём как есть
+      output: '\({upsert: .})'
+      next: reply_start
+
+  reply_start:
+    telegramBot:
+      token: \(lockboxPayload("e6qgs4nem0uvu1mdvu01"; "token"))
+      sendMessage:
+        chatId: \(.input.message.chat.id)
+        replyTo: \((.input.message.message_id // 0))
+        text: '\(
+          "Привет! Я Электрик ИИ-агент.\n" +
+          (if (.upsert.created // false)
+           then "Создал проект: «" + (.upsert.project_name // "Проект") + "» (ID " + ((.upsert.project_id // 0) | tostring) + ")."
+           else "Нашёл проект: «" + (.upsert.project_name // "Проект") + "» (ID " + ((.upsert.project_id // 0) | tostring) + ")."
+           end) +
+          "\nГотов продолжать."
+          )'
+        parseMode: HTML
+
+  # === Не /start: грузим контекст текущего проекта ===
+  load_ctx:
+    httpCall:
+      url: https://functions.yandexcloud.net/d4e8ta94341329251lah
+      method: POST
+      headers:
+        Content-Type: application/json
+      body: |
+        \({
+          action: "getcurrentproject",
+          tg_user_id: .input.message.from.id
+        })
+      output: '\({proj: .})'
+      timeout: 10s
+      retryPolicy:
+        errorList:
+          - HTTP_CALL_504
+          - HTTP_CALL_500
+          - STEP_INTERNAL
+        errorListMode: INCLUDE
+        retryCount: 3
+        initialDelay: 0.5s
+        maxDelay: 3s
+        backoffRate: 2.0
+      next: call_ai
+      catch:
+        - errorList:
+            - HTTP_CALL_504
+            - HTTP_CALL_500
+            - STEP_INTERNAL
+          errorListMode: INCLUDE
+          output: '\({err: .})'
+          next: reply_backend_error
+          
+  reply_backend_error:
+    telegramBot:
+      token: \(lockboxPayload("e6qgs4nem0uvu1mdvu01"; "token"))
+      sendMessage:
+        chatId: \(.input.message.chat.id)
+        replyTo: \((.input.message.message_id // 0))
+        text: >-
+          \(
+            "Бэкенд вернул ошибку при загрузке контекста.\n\n" +
+            "raw error:\n" +
+            ((.err // {}) | tojson)
+          )
+        parseMode: HTML
+
+  # === Агент: выдаёт СТРОГИЙ JSON батч ===
+  call_ai:
+    aiAgent:
+      agentConfig:
+        role: >
+          Ты — ассистент по электротехническому проектированию.
+          Твоя задача — переводить запрос пользователя в СТРОГИЙ JSON-батч команд
+          для изменения контекста проекта.
+          ВАЖНО: отвечай ТОЛЬКО валидным JSON-объектом, БЕЗ пояснений и БЕЗ код-блоков ```.
+        goal: >
+          Возвращай JSON вида:
+          {
+            "kind": "proj_context",
+            "confirm_needed": true,
+            "description": "кратко что делаем",
+            "commands": [ ... ]
+          }
+
+          Допустимые поля команд:
+          - cmd_type: "add" | "move" | "replace" | "delete" | "set"
+          - target_type:
+              - "project"            — метаданные проекта (name, description, address, customer)
+              - "area"               — области (помещения)
+              - "electrical_box"     — электрощиты
+              - "product"            — (позже)
+          - link:
+              - "root"                       — добавить в корень (для областей или установки project-полей)
+              - "area:/Путь/Через/Имена"     — путь к области
+              - "area:ID"                    — по числовому ID области (например, "area:12")
+              - "panel:<id|name>"            — внутрь щита (позже)
+          - target_id: строка вида "area#ID" или "panel#ID" (для move/delete, если задано — приоритетнее link)       
+          - payload: объект с полями (для move укажи payload.to: "root" | "area:/..."/"area:ID")
+          Правила:
+          - Если куда добавлять не указано — подразумевай "root".
+          - Для move/delete указывай либо target_id (предпочтительно), либо связку link + имя/ID сущности в payload.
+          - Области вложенные: любая область может содержать areas[] и electrical_boxes[].
+          - Не придумывай ID — если нужно сослаться на сущность по ID, используй то, что явно известно из контекста.
+          - Никакого лишнего текста, только JSON.
+          Примеры:
+          1) Обновить метаданные проекта:
+            {
+              "kind":"proj_context",
+              "confirm_needed": true,
+              "description":"Обновление полей проекта",
+              "commands":[
+                {
+                  "cmd_type":"set",
+                  "target_type":"project",
+                  "link":"root",
+                  "payload":{
+                    "name":"Кафе на набережной",
+                    "description":"Умное кафе KNX",
+                    "address":"Ялта",
+                    "customer":"ООО Море"
+                  }
+                }
+              ]
+            }
+
+          2) Добавить области (в корень) и вложенную область:
+            {
+              "kind":"proj_context",
+              "confirm_needed": true,
+              "description":"Добавление областей",
+              "commands":[
+                {"cmd_type":"add","target_type":"area","link":"root","payload":{"name":"Гостиная"}},
+                {"cmd_type":"add","target_type":"area","link":"root","payload":{"name":"Электрощитовая"}},
+                {"cmd_type":"add","target_type":"area","link":"area:/Гостиная","payload":{"name":"Тех. пом №1"}}
+              ]
+            }
+
+          3) Добавить электрощиты в область по имени:
+            {
+              "kind":"proj_context",
+              "confirm_needed": true,
+              "description":"Добавление щитов",
+              "commands":[
+                {"cmd_type":"add","target_type":"electrical_box","link":"area:/Электрощитовая","payload":{"name":"ЩА","desc":"Щит автоматики"}},
+                {"cmd_type":"add","target_type":"electrical_box","link":"area:/Электрощитовая","payload":{"name":"ЩР","desc":"Щит распределительный"}}
+              ]
+            }
+
+          4) Переместить область целиком (по target_id) под другую область:
+            {
+              "kind":"proj_context",
+              "confirm_needed": true,
+              "description":"Перемещение области по ID",
+              "commands":[
+                {"cmd_type":"move","target_type":"area","target_id":"area#7","payload":{"to":"area:/Кафе на набережной"}}
+              ]
+            }
+
+          5) Переместить щит между областями (по имени в payload и путям):
+            {
+              "kind":"proj_context",
+              "confirm_needed": true,
+              "description":"Перемещение щита",
+              "commands":[
+                {"cmd_type":"move","target_type":"electrical_box","link":"area:/ТП1","payload":{"name":"ЩА","to":"area:/Кафе на набережной/Электрощитовая"}}
+              ]
+            }
+
+          6) Удалить область (по пути) и щит (по имени):
+            {
+              "kind":"proj_context",
+              "confirm_needed": true,
+              "description":"Удаление области и щита",
+              "commands":[
+                {"cmd_type":"delete","target_type":"area","link":"area:/Кафе на набережной/Комната 2","payload":{}},
+                {"cmd_type":"delete","target_type":"electrical_box","link":"area:/Электрощитовая","payload":{"name":"ЩР"}}
+              ]
+            }
+
+          Если данных недостаточно — верни:
+          {"error":"explain","missing":["что именно непонятно..."]}
+        backstory: >
+          Текущий контекст проекта (JSON): "\(.proj.context | tojson)"
+          Имя проекта: "\(.proj.name // "Проект")"
+        model:
+          # Вариант 1 (короткое имя):
+          # name: yandexgpt
+          # Вариант 2 (URI — надёжно при неоднозначностях):
+          uri: gpt://b1gcs4t2ea41k8loh09o/yandexgpt/latest
+      tasks:
+        - description: \(.input.message.text)
+          result: "СТРОГИЙ JSON-батч по указанной схеме. Никакого текста."
+      output: '\({ai: .})'
+      next: reply_ai
+      catch:
+        - errorList:
+            - STEP_INVALID_ARGUMENT
+            - STEP_INTERNAL
+          errorListMode: INCLUDE
+          output: '\({ai_error: .})'
+          next: reply_ai_error
+
+  reply_ai:
+    # показываем пользователю «как есть», но без ограждающих ```
+    telegramBot:
+      token: \(lockboxPayload("e6qgs4nem0uvu1mdvu01"; "token"))
+      sendMessage:
+        chatId: \(.input.message.chat.id)
+        replyTo: \((.input.message.message_id // 0))
+        text: >-
+          \(
+            "<pre>" +
+            (
+              (.ai.Result // "")
+              | gsub("```[a-zA-Z0-9_-]*"; "")  # убираем ```json
+              | gsub("```"; "")                # и закрывающие ```
+            )
+            + "</pre>"
+          )
+        parseMode: HTML
+      next: apply_batch
+
+  apply_batch:
+    httpCall:
+      url: https://functions.yandexcloud.net/d4e8ta94341329251lah
+      method: POST
+      headers:
+        Content-Type: application/json
+      body: |
+        \({
+          action: "applybatch",
+          tg_user_id: .input.message.from.id,
+          batch:
+          (
+            (.ai.Result // "")
+            | gsub("```[a-zA-Z0-9_-]*"; "")
+            | gsub("```"; "")
+            | fromjson
+          )
+        })
+      output: '\({apply: .})'
+      timeout: 15s
+      retryPolicy:
+        errorList:
+          - HTTP_CALL_504
+          - HTTP_CALL_500
+          - STEP_INTERNAL
+        errorListMode: INCLUDE
+        retryCount: 2
+        initialDelay: 0.5s
+        maxDelay: 2s
+        backoffRate: 2.0
+      next: reply_apply
+      catch:
+        - errorList:
+            - STEP_INVALID_TEMPLATE_EXPRESSION
+            - STEP_INVALID_ARGUMENT
+            - STEP_INTERNAL
+          errorListMode: INCLUDE
+          output: '\({apply_err: .})'
+          next: reply_ai_error
+
+  reply_apply:
+    telegramBot:
+      token: \(lockboxPayload("e6qgs4nem0uvu1mdvu01"; "token"))
+      sendMessage:
+        chatId: \(.input.message.chat.id)
+        replyTo: \((.input.message.message_id // 0))
+        text: '\(
+          "Готово. Применено: " + ((.apply.applied // 0)|tostring) + " из " + ((.apply.total // 0)|tostring) +
+          (if (.apply.results|length) > 0 then
+             "\n" + ((.apply.results | map(select(.ok==false) | "* " + (.error // "err") + " @idx=" + ((.index//0)|tostring)) | join("\n")))
+           else "" end) +
+          (if (.apply.rev_id != null) then "\nРевизия: " + ((.apply.rev_id // 0)|tostring) else "" end)
+          )'
+        parseMode: HTML
+
+  reply_ai_error:
+    telegramBot:
+      token: \(lockboxPayload("e6qgs4nem0uvu1mdvu01"; "token"))
+      sendMessage:
+        chatId: \(.input.message.chat.id)
+        replyTo: \((.input.message.message_id // 0))
+        text: >-
+          \(
+            "Не смог применить команды.\n" +
+            "Похоже, модель прислала невалидный JSON.\n" +
+            "Попробуй переформулировать или повторить запрос."
+          )
+        parseMode: HTML
