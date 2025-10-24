@@ -80,7 +80,7 @@ steps:
           errorListMode: INCLUDE
           output: '\({err: .})'
           next: reply_backend_error
-          
+
   reply_backend_error:
     telegramBot:
       token: \(lockboxPayload("e6qgs4nem0uvu1mdvu01"; "token"))
@@ -114,19 +114,20 @@ steps:
           }
 
           Допустимые поля команд:
-          - cmd_type: "add" | "move" | "replace" | "delete" | "set"
-          - target_type:
-              - "project"            — метаданные проекта (name, description, address, customer)
-              - "area"               — области (помещения)
-              - "electrical_box"     — электрощиты
-              - "product"            — (позже)
-          - link:
-              - "root"                       — добавить в корень (для областей или установки project-полей)
-              - "area:/Путь/Через/Имена"     — путь к области
-              - "area:ID"                    — по числовому ID области (например, "area:12")
-              - "panel:<id|name>"            — внутрь щита (позже)
-          - target_id: строка вида "area#ID" или "panel#ID" (для move/delete, если задано — приоритетнее link)       
-          - payload: объект с полями (для move укажи payload.to: "root" | "area:/..."/"area:ID")
+           - cmd_type: "add" | "move" | "replace" | "delete" | "set"
+           - target_type:
+               - "project"            — метаданные проекта (name, description, address, customer)
+               - "area"               — области (помещения)
+               - "electrical_box"     — электрощиты
+               - "product"            — (позже)
+           - link:
+               - "root"                       — добавить в корень (для областей или установки project-полей)
+               - "area:/Путь/Через/Имена"     — путь к области
+               - "area:ID"                    — по числовому ID области (например, "area:12")
+               - "panel:<id|name>"            — внутрь щита (позже)
+           - target_id: строка вида "area#ID" или "panel#ID" (для move/delete, если задано — приоритетнее link)
+           - desc: краткое описание команды (для отображения в UI как "что делаем")
+           - payload: объект с полями (для move укажи payload.to: "root" | "area:/..."/"area:ID")
           Правила:
           - Если куда добавлять не указано — подразумевай "root".
           - Для move/delete указывай либо target_id (предпочтительно), либо связку link + имя/ID сущности в payload.
@@ -144,6 +145,7 @@ steps:
                   "cmd_type":"set",
                   "target_type":"project",
                   "link":"root",
+                  "desc":"Установить имя проекта, описание, адрес и заказчика",
                   "payload":{
                     "name":"Кафе на набережной",
                     "description":"Умное кафе KNX",
@@ -160,9 +162,9 @@ steps:
               "confirm_needed": true,
               "description":"Добавление областей",
               "commands":[
-                {"cmd_type":"add","target_type":"area","link":"root","payload":{"name":"Гостиная"}},
-                {"cmd_type":"add","target_type":"area","link":"root","payload":{"name":"Электрощитовая"}},
-                {"cmd_type":"add","target_type":"area","link":"area:/Гостиная","payload":{"name":"Тех. пом №1"}}
+                {"cmd_type":"add","target_type":"area","link":"root","desc":"Добавить область Гостиная","payload":{"name":"Гостиная"}},
+                {"cmd_type":"add","target_type":"area","link":"root","desc":"Добавить область Электрощитовая","payload":{"name":"Электрощитовая"}},
+                {"cmd_type":"add","target_type":"area","link":"area:/Гостиная","desc":"Добавить вложенную область Тех. пом №1","payload":{"name":"Тех. пом №1"}}
               ]
             }
 
@@ -172,8 +174,8 @@ steps:
               "confirm_needed": true,
               "description":"Добавление щитов",
               "commands":[
-                {"cmd_type":"add","target_type":"electrical_box","link":"area:/Электрощитовая","payload":{"name":"ЩА","desc":"Щит автоматики"}},
-                {"cmd_type":"add","target_type":"electrical_box","link":"area:/Электрощитовая","payload":{"name":"ЩР","desc":"Щит распределительный"}}
+                {"cmd_type":"add","target_type":"electrical_box","link":"area:/Электрощитовая","desc":"Добавить щит ЩА (Щит автоматики)","payload":{"name":"ЩА","desc":"Щит автоматики"}},
+                {"cmd_type":"add","target_type":"electrical_box","link":"area:/Электрощитовая","desc":"Добавить щит ЩР (Щит распределительный)","payload":{"name":"ЩР","desc":"Щит распределительный"}}
               ]
             }
 
@@ -183,7 +185,7 @@ steps:
               "confirm_needed": true,
               "description":"Перемещение области по ID",
               "commands":[
-                {"cmd_type":"move","target_type":"area","target_id":"area#7","payload":{"to":"area:/Кафе на набережной"}}
+                {"cmd_type":"move","target_type":"area","target_id":"area#7","desc":"Переместить область area#7 в Кафе на набережной","payload":{"to":"area:/Кафе на набережной"}}
               ]
             }
 
@@ -193,7 +195,7 @@ steps:
               "confirm_needed": true,
               "description":"Перемещение щита",
               "commands":[
-                {"cmd_type":"move","target_type":"electrical_box","link":"area:/ТП1","payload":{"name":"ЩА","to":"area:/Кафе на набережной/Электрощитовая"}}
+                {"cmd_type":"move","target_type":"electrical_box","link":"area:/ТП1","desc":"Переместить щит ЩА в Электрощитовая Кафе на набережной","payload":{"name":"ЩА","to":"area:/Кафе на набережной/Электрощитовая"}}
               ]
             }
 
@@ -203,8 +205,8 @@ steps:
               "confirm_needed": true,
               "description":"Удаление области и щита",
               "commands":[
-                {"cmd_type":"delete","target_type":"area","link":"area:/Кафе на набережной/Комната 2","payload":{}},
-                {"cmd_type":"delete","target_type":"electrical_box","link":"area:/Электрощитовая","payload":{"name":"ЩР"}}
+                {"cmd_type":"delete","target_type":"area","link":"area:/Кафе на набережной/Комната 2","desc":"Удалить область Комната 2","payload":{}},
+                {"cmd_type":"delete","target_type":"electrical_box","link":"area:/Электрощитовая","desc":"Удалить распределительный щит ЩР","payload":{"name":"ЩР"}}
               ]
             }
 
@@ -214,10 +216,11 @@ steps:
           Текущий контекст проекта (JSON): "\(.proj.context | tojson)"
           Имя проекта: "\(.proj.name // "Проект")"
         model:
-          # Вариант 1 (короткое имя):
-          # name: yandexgpt
-          # Вариант 2 (URI — надёжно при неоднозначностях):
-          uri: gpt://b1gcs4t2ea41k8loh09o/yandexgpt/latest
+          # Рекомендуется YandexGPT Pro 5.1 (оптимальный баланс цена/качество для JSON + текста)
+          # URI для версии 5.1 в ветке RC (Release Candidate)
+          uri: gpt://b1gcs4t2ea41k8loh09o/yandexgpt/rc
+          # Альтернатива: использовать /latest (будет 5.1 после релиза)
+          # uri: gpt://b1gcs4t2ea41k8loh09o/yandexgpt/latest
       tasks:
         - description: \(.input.message.text)
           result: "СТРОГИЙ JSON-батч по указанной схеме. Никакого текста."
